@@ -67,6 +67,7 @@ class Tracking:
                 assert backend in self.supported_backend, f"{backend} is not supported"
 
         self.logger = {}
+        self._finished = False
 
         if "tracking" in default_backend or "wandb" in default_backend:
             import os
@@ -183,21 +184,33 @@ class Tracking:
             if backend is None or default_backend in backend:
                 logger_instance.log(data=data, step=step)
 
+    def finish(self, exit_code=0, suppress_errors=False):
+        if self._finished:
+            return
+        self._finished = True
+
+        finish_ops = {
+            "wandb": lambda backend: backend.finish(exit_code=exit_code),
+            "swanlab": lambda backend: backend.finish(),
+            "vemlp_wandb": lambda backend: backend.finish(exit_code=exit_code),
+            "tensorboard": lambda backend: backend.finish(),
+            "clearml": lambda backend: backend.finish(),
+            "trackio": lambda backend: backend.finish(),
+            "file": lambda backend: backend.finish(),
+        }
+
+        for backend_name, finish_op in finish_ops.items():
+            backend = self.logger.get(backend_name)
+            if backend is None:
+                continue
+            try:
+                finish_op(backend)
+            except Exception:
+                if not suppress_errors:
+                    logger.warning("Failed to finish %s tracking backend cleanly.", backend_name, exc_info=True)
+
     def __del__(self):
-        if "wandb" in self.logger:
-            self.logger["wandb"].finish(exit_code=0)
-        if "swanlab" in self.logger:
-            self.logger["swanlab"].finish()
-        if "vemlp_wandb" in self.logger:
-            self.logger["vemlp_wandb"].finish(exit_code=0)
-        if "tensorboard" in self.logger:
-            self.logger["tensorboard"].finish()
-        if "clearml" in self.logger:
-            self.logger["clearml"].finish()
-        if "trackio" in self.logger:
-            self.logger["trackio"].finish()
-        if "file" in self.logger:
-            self.logger["file"].finish()
+        self.finish(exit_code=0, suppress_errors=True)
 
 
 class ClearMLLogger:

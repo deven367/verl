@@ -1312,6 +1312,7 @@ class RayPPOTrainer:
             pprint(f"Initial validation metrics: {val_metrics}")
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
+                logger.finish()
                 return
 
         if self.config.actor_rollout_ref.rollout.skip.get("enable", False):
@@ -1640,6 +1641,16 @@ class RayPPOTrainer:
                             metrics[f"gdpo/{key}/std"] = float(np.std(vals))
                             metrics[f"gdpo/{key}/max"] = float(np.max(vals))
                             metrics[f"gdpo/{key}/min"] = float(np.min(vals))
+                # Log per-component reward metrics for all adv_estimators (e.g. GRPO)
+                for key, values in reward_extra_infos_dict.items():
+                    if len(values) == 0:
+                        continue
+                    try:
+                        vals = np.asarray(values, dtype=np.float32)
+                        metrics[f"train/reward_extra/{key}/mean"] = float(np.mean(vals))
+                        metrics[f"train/reward_extra/{key}/std"] = float(np.std(vals))
+                    except (TypeError, ValueError):
+                        pass
                 metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
                 # TODO: implement actual tflpo and theoretical tflpo
                 n_gpus = self.resource_pool_manager.get_n_gpus()
@@ -1671,6 +1682,7 @@ class RayPPOTrainer:
                     if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                         self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=True)
                     pprint(f"Final validation metrics: {last_val_metrics}")
+                    logger.finish()
                     progress_bar.close()
                     return
 
