@@ -14,8 +14,11 @@
 
 import json
 import os
+import sys
+import types
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import torch
@@ -30,6 +33,36 @@ except ImportError:
 from tqdm import tqdm
 
 from .base_model_merger import BaseModelMerger
+
+
+def _install_legacy_dtensor_pickle_shims() -> None:
+    """Install shims for DTensor checkpoints saved with older torch internals."""
+    mesh_layout_module_name = "torch.distributed._mesh_layout"
+    mesh_layout_module = sys.modules.get(mesh_layout_module_name)
+    if mesh_layout_module is None:
+        mesh_layout_module = types.ModuleType(mesh_layout_module_name)
+        sys.modules[mesh_layout_module_name] = mesh_layout_module
+
+    if not hasattr(mesh_layout_module, "_MeshLayout"):
+        class _MeshLayout:
+            def __init__(self, shape=None, stride=None):
+                if shape is not None:
+                    self.shape = shape
+                if stride is not None:
+                    self.stride = stride
+
+        _MeshLayout.__module__ = mesh_layout_module_name
+        mesh_layout_module._MeshLayout = _MeshLayout
+
+    import torch.distributed.tensor._dtensor_spec as dtensor_spec
+
+    if not hasattr(dtensor_spec, "ShardOrderEntry"):
+        class ShardOrderEntry(NamedTuple):
+            mesh_dim: int
+            shard_indices: tuple[int, ...]
+
+        ShardOrderEntry.__module__ = dtensor_spec.__name__
+        dtensor_spec.ShardOrderEntry = ShardOrderEntry
 
 
 class FSDPModelMerger(BaseModelMerger):
@@ -87,13 +120,38 @@ class FSDPModelMerger(BaseModelMerger):
         return world_size
 
     def _load_rank_zero_state_dict(self, world_size: int) -> dict:
+        _install_legacy_dtensor_pickle_shims()
         return torch.load(
             Path(self.config.local_dir) / f"model_world_size_{world_size}_rank_0.pt",
             map_location="cpu",
             weights_only=False,
         )
 
-    def _extract_device_mesh_info(self, state_dict: dict, world_size: int) -> tuple[np.ndarray, tuple[str, ...]]:
+    def _extract_device_mesh_tensor_and_names(
+        self, device_mesh
+    ) -> tuple[torch.Tensor | np.ndarray, tuple[str, ...]]:
+        mesh = getattr(device_mesh, "mesh", None)
+        if mesh is None:
+            mesh = getattr(device_mesh, "_rank_map", None)
+        if mesh is None:
+            flatten_rank_map = getattr(device_mesh, "_flatten_rank_map", None)
+            if flatten_rank_map is not None:
+                mesh = np.array(flatten_rank_map, dtype=np.int64)
+        if mesh is None:
+            attrs = getattr(device_mesh, "__dict__", {})
+            raise AttributeError(f"Cannot extract mesh ranks from DeviceMesh attrs: {sorted(attrs)}")
+
+        mesh_dim_names = getattr(device_mesh, "mesh_dim_names", None)
+        if mesh_dim_names is None:
+            mesh_dim_names = getattr(device_mesh, "_mesh_dim_names", None)
+        if mesh_dim_names is None:
+            mesh_dim_names = ("fsdp",)
+
+        return mesh, tuple(mesh_dim_names)
+
+    def _extract_device_mesh_info(
+        self, state_dict: dict, world_size: int
+    ) -> tuple[torch.Tensor | np.ndarray, tuple[str, ...]]:
         """
         Retrieves sharding information (device_mesh, mesh_dim_names) from a DTensor in the state_dict.
         If no DTensor is found, infers a simple FSDP mesh based on world_size.
@@ -104,8 +162,7 @@ class FSDPModelMerger(BaseModelMerger):
         if isinstance(weight, DTensor):
             # get sharding info
             device_mesh = weight.device_mesh
-            mesh = device_mesh.mesh
-            mesh_dim_names = device_mesh.mesh_dim_names
+            mesh, mesh_dim_names = self._extract_device_mesh_tensor_and_names(device_mesh)
         else:
             # for non-DTensor
             mesh = np.array([world_size], dtype=np.int64)
@@ -114,7 +171,7 @@ class FSDPModelMerger(BaseModelMerger):
         return mesh, mesh_dim_names
 
     def _calculate_shard_configuration(
-        self, mesh: np.ndarray, mesh_dim_names: tuple[str, ...]
+        self, mesh: torch.Tensor | np.ndarray, mesh_dim_names: tuple[str, ...]
     ) -> tuple[int, tuple[int, ...]]:
         """Calculates the total number of shards and the shape of the device mesh."""
         assert mesh_dim_names in (("fsdp",), ("ddp", "fsdp")), f"Unsupported mesh_dim_names {mesh_dim_names}"
@@ -147,6 +204,7 @@ class FSDPModelMerger(BaseModelMerger):
 
         def process_one_shard(rank: int, model_state_dict_lst: list):
             model_path = Path(self.config.local_dir) / f"model_world_size_{world_size}_rank_{rank}.pt"
+            _install_legacy_dtensor_pickle_shims()
             state_dict = torch.load(model_path, map_location="cpu", weights_only=False)
             model_state_dict_lst[rank] = state_dict
             return state_dict

@@ -16,6 +16,7 @@ The concrete Engine implementation using PyTorch FullyShardedDataParallel (FSDP)
 """
 
 import gc
+import inspect
 import logging
 import os
 import warnings
@@ -317,6 +318,18 @@ class FSDPEngine(BaseEngine):
                 "target_parameters": convert_to_regular_types(self.model_config.target_parameters),
                 "exclude_modules": convert_to_regular_types(self.model_config.exclude_modules),
                 "bias": "none",
+            }
+            supported_lora_args = set(inspect.signature(LoraConfig).parameters)
+            unsupported_lora_args = {
+                key: value for key, value in lora_config.items() if key not in supported_lora_args and value is not None
+            }
+            if unsupported_lora_args:
+                raise TypeError(
+                    "Installed PEFT LoraConfig does not support non-null verl LoRA fields: "
+                    f"{sorted(unsupported_lora_args)}"
+                )
+            lora_config = {
+                key: value for key, value in lora_config.items() if key in supported_lora_args and value is not None
             }
             module = get_peft_model(module, LoraConfig(**lora_config))
 
