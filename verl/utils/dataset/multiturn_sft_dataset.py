@@ -41,6 +41,8 @@ from verl.utils.py_functional import convert_nested_value_to_list_recursive
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
+LLAMA3_CHAT_TEMPLATE = """{% for message in messages %}{% set content = '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n' + message['content'] | trim + '<|eot_id|>' %}{% if loop.index0 == 0 %}{% set content = bos_token + content %}{% endif %}{{ content }}{% endfor %}{% if add_generation_prompt %}{{ '<|start_header_id|>assistant<|end_header_id|>\n\n' }}{% endif %}"""
+
 
 def once(func):
     """Decorator to ensure a function runs only once. Subsequent calls do nothing."""
@@ -123,6 +125,8 @@ class MultiTurnSFTDataset(Dataset):
         if isinstance(tokenizer, str):
             tokenizer = hf_tokenizer(tokenizer)
         self.tokenizer: PreTrainedTokenizer = tokenizer
+        if self.tokenizer.chat_template is None:
+            self.tokenizer.chat_template = LLAMA3_CHAT_TEMPLATE
         self.processor = processor
 
         self._download()
